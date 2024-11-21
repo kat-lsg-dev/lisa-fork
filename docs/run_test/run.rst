@@ -14,3 +14,4 @@ Run LISA
    Use command line <command_line>
    Use transformers <transformers>
    Analyze test results <understand_results>
+   Troubleshoot test failures <troubleshoot_failures>
