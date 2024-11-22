@@ -33,7 +33,7 @@ results of all tests.
 
 The test result message is the easiest, fastest way to understand a test
 failure.  It is derived from assertion or exception messages.  Failures
-are categorized by similiar messages.
+are categorized by similar messages.
 
 Log Folder Structure
 --------------------
