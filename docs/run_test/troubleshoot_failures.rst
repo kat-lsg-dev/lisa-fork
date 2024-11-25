@@ -15,9 +15,11 @@ To understand a test failure, the recommended troubleshooting path is:
    1. Check the Test results error messages in console output.  The test
       result message is the easiest, fastest way to understand a test
       failure.  It is derived from assertion or exception messages. 
-   1. Check the log files.  Search the root log file which contains traces and commands output, as well as the split log files which are smaller in size.
-   2. Search the LISA code for issues.
-   3. Try to reproduce failure manually, deploy and run resources.
+   2. Check the log files.  Search the root log file which contains
+      traces and commands output, as well as the split log files which
+      are smaller in size.
+   3. Search the LISA code for issues.
+   4. Try to reproduce failure manually, deploy and run resources.
 
 Test results
 ------------
