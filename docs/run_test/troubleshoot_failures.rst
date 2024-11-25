@@ -140,7 +140,7 @@ corresponding to the time of the test run.  Inside the log's timestamped
 folder, the contents are further split by environment and test case. 
 If the test run only has a few cases, the full log (`lisa-<timestamp>.log`)
 may be easier to read. If it is run with concurrency, the split logs may
-be easier to read.  The logs will show INFO and above levels by default.
+be easier to read.  
 
 - **LOG FOLDER STRUCTURE** 
 
