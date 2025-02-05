@@ -3,6 +3,7 @@
 
 import base64
 import gzip
+import random
 from typing import Any, Dict, Optional
 
 from assertpy import assert_that
@@ -21,7 +22,6 @@ from lisa.operating_system import BSD
 from lisa.sut_orchestrator import AZURE
 from lisa.sut_orchestrator.azure.features import AzureExtension
 from lisa.sut_orchestrator.azure.tools import Waagent
-from lisa.util import LisaException
 from microsoft.testsuites.vm_extensions.runtime_extensions.common import (
     check_waagent_version_supported,
     execute_command,
@@ -40,17 +40,7 @@ def _create_and_verify_extension_run(
 ) -> None:
     extension = node.features[AzureExtension]
     extension_name = "CustomScript"
-    try:
-        # Delete VM Extension if already present
-        extension.delete(extension_name)
-    except HttpResponseError as identifier:
-        if any(s in str(identifier) for s in ["was not found"]):
-            node.log.info(f"{extension_name} is not installed")
-        else:
-            raise LisaException(
-                f"unexpected exception happened {identifier} during delete"
-                f" extension {extension_name}"
-            ) from identifier
+    extension.delete(name=extension_name, ignore_not_found=True)
 
     def enable_extension() -> Any:
         result = extension.create_or_update(
@@ -396,7 +386,8 @@ class CustomScriptTests(TestSuite):
     ) -> None:
         container_name = "cselisa"
         blob_name = "no-sas.sh"
-        test_file = "/tmp/cse-no-sas.txt"
+        random_str = "".join(random.sample("0123456789", 10))
+        test_file = f"/tmp/cse-no-sas-{random_str}.txt"
 
         blob_url = retrieve_storage_blob_url(
             node=node,
