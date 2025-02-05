@@ -64,6 +64,7 @@ from lisa.tools import (
     Lsblk,
     Lspci,
     Modprobe,
+    Nvmecli,
     Rm,
     Sed,
 )
@@ -97,6 +98,7 @@ from .common import (
     AzureCapability,
     AzureImageSchema,
     AzureNodeSchema,
+    DiskPlacementType,
     check_or_create_storage_account,
     create_update_private_dns_zone_groups,
     create_update_private_endpoints,
@@ -112,6 +114,7 @@ from .common import (
     delete_virtual_network_links,
     find_by_name,
     get_compute_client,
+    get_disk_placement_priority,
     get_network_client,
     get_node_context,
     get_or_create_file_share,
@@ -1307,6 +1310,31 @@ _disk_size_performance_map: Dict[schema.DiskType, List[Tuple[int, int, int]]] = 
 @dataclass()
 class AzureDiskOptionSettings(schema.DiskOptionSettings):
     has_resource_disk: Optional[bool] = None
+    ephemeral_disk_placement_type: Optional[
+        Union[search_space.SetSpace[DiskPlacementType], DiskPlacementType]
+    ] = field(  # type:ignore
+        default_factory=partial(
+            search_space.SetSpace,
+            items=[
+                DiskPlacementType.NONE,
+                DiskPlacementType.RESOURCE,
+                DiskPlacementType.CACHE,
+                DiskPlacementType.NVME,
+            ],
+        ),
+        metadata=field_metadata(
+            decoder=partial(
+                search_space.decode_nullable_set_space,
+                base_type=DiskPlacementType,
+                default_values=[
+                    DiskPlacementType.NONE,
+                    DiskPlacementType.RESOURCE,
+                    DiskPlacementType.CACHE,
+                    DiskPlacementType.NVME,
+                ],
+            )
+        ),
+    )
 
     def __hash__(self) -> int:
         return super().__hash__()
@@ -1315,7 +1343,11 @@ class AzureDiskOptionSettings(schema.DiskOptionSettings):
         return self.__repr__()
 
     def __repr__(self) -> str:
-        return f"has_resource_disk: {self.has_resource_disk},{super().__repr__()}"
+        return (
+            f"has_resource_disk: {self.has_resource_disk},"
+            f"ephemeral_disk_placement_type: {self.ephemeral_disk_placement_type},"
+            f"{super().__repr__()}"
+        )
 
     def __eq__(self, o: object) -> bool:
         if not super().__eq__(o):
@@ -1374,6 +1406,13 @@ class AzureDiskOptionSettings(schema.DiskOptionSettings):
             "has_resource_disk",
         )
         result.merge(
+            search_space.check_setspace(
+                self.ephemeral_disk_placement_type,
+                capability.ephemeral_disk_placement_type,
+            ),
+            "ephemeral_disk_placement_type",
+        )
+        result.merge(
             search_space.check_countspace(
                 self.max_data_disk_count, capability.max_data_disk_count
             ),
@@ -1388,7 +1427,7 @@ class AzureDiskOptionSettings(schema.DiskOptionSettings):
 
         return result
 
-    def _call_requirement_method(
+    def _call_requirement_method(  # noqa: C901
         self, method: RequirementMethod, capability: Any
     ) -> Any:
         assert isinstance(
@@ -1474,6 +1513,38 @@ class AzureDiskOptionSettings(schema.DiskOptionSettings):
             capability.disk_controller_type,
             schema.disk_controller_type_priority,
         )
+
+        # refer
+        # https://learn.microsoft.com/en-us/powershell/module/az.compute/set-azvmssstorageprofile?view=azps-13.0.0             # noqa: E501
+        # https://github.com/MicrosoftDocs/azure-compute-docs/blob/main/articles/virtual-machines/ephemeral-os-disks-faq.md    # noqa: E501
+        # Currently, the supported ephemeral disk placement types are - Resource(or Temp), Cache and NVMe.                     # noqa: E501
+        # The Ephemeral Disk Placement type is set in the "DiffDiskPlacement" property of the VM's storage profile.            # noqa: E501
+        if value.os_disk_type == schema.DiskType.Ephemeral:
+            cap_ephemeral_disk_placement_type = capability.ephemeral_disk_placement_type
+            if isinstance(cap_ephemeral_disk_placement_type, search_space.SetSpace):
+                assert len(cap_ephemeral_disk_placement_type) > 0, (
+                    "capability should have at least one ephemeral disk placement type,"
+                    " but it's empty"
+                )
+            elif isinstance(cap_ephemeral_disk_placement_type, DiskPlacementType):
+                cap_ephemeral_disk_placement_type = search_space.SetSpace[
+                    DiskPlacementType
+                ](is_allow_set=True, items=[cap_ephemeral_disk_placement_type])
+            else:
+                raise LisaException(
+                    "unknown ephemeral disk placement type "
+                    f"on capability, type: {cap_ephemeral_disk_placement_type}"
+                )
+
+            value.ephemeral_disk_placement_type = getattr(
+                search_space, f"{method.value}_setspace_by_priority"
+            )(
+                self.ephemeral_disk_placement_type,
+                capability.ephemeral_disk_placement_type,
+                get_disk_placement_priority(),
+            )
+        else:
+            value.ephemeral_disk_placement_type = DiskPlacementType.NONE
 
         # below values affect data disk only.
         if self.data_disk_count is not None or capability.data_disk_count is not None:
@@ -1632,12 +1703,6 @@ class Disk(AzureFeatureMixin, features.Disk):
         r"^(?!\s*#)\s*mounts:\s+-\s*\[\s*ephemeral[0-9]+,\s*([^,\s]+)\s*\]", re.M
     )
 
-    # /dev/nvme0n1p15 -> /dev/nvme0n1
-    NVME_NAMESPACE_PATTERN = re.compile(r"/dev/nvme[0-9]+n[0-9]+", re.M)
-
-    # /dev/nvme0n1p15 -> /dev/nvme0
-    NVME_CONTROLLER_PATTERN = re.compile(r"/dev/nvme[0-9]+", re.M)
-
     # <Msft Virtual Disk 1.0>            at scbus0 target 0 lun 0 (pass0,da0)
     # <Msft Virtual Disk 1.0>            at scbus0 target 0 lun 1 (pass1,da1)
     # <Msft Virtual DVD-ROM 1.0>         at scbus0 target 0 lun 2 (pass2,cd0)
@@ -1719,34 +1784,78 @@ class Disk(AzureFeatureMixin, features.Disk):
         return azure_scsi_disks
 
     def get_luns(self) -> Dict[str, int]:
-        # disk_controller_type == SCSI
         # get azure scsi attached disks
         device_luns = {}
-        if isinstance(self._node.os, BSD):
-            cmd_result = self._node.execute(
-                "camcontrol devlist",
-                shell=True,
-                sudo=True,
+        # If disk_controller_type == NVME
+        #
+        # LUN numbers is a concept of SCSI and not applicable for NVME.
+        # But in Azure, remote data disks attached with NVME disk controller show LUN
+        # numbers in "Namespace" field of nvme-cli output with an off set of +2.
+        # If we reduce the Namespace id by 2 we can get the LUN id of any attached
+        # azure data disks.
+        # Example:
+        # root@lisa--170-e0-n0:/home/lisa# nvme -list
+        # Node                  SN                   Model                                    Namespace Usage                      Format           FW Rev   # noqa: E501
+        # --------------------- -------------------- ---------------------------------------- --------- -------------------------- ---------------- -------  # noqa: E501
+        # /dev/nvme0n1          SN: 000001           MSFT NVMe Accelerator v1.0               1          29.87  GB /  29.87  GB    512   B +  0 B   v1.0000  # noqa: E501
+        # /dev/nvme0n2          SN: 000001           MSFT NVMe Accelerator v1.0               2           4.29  GB /   4.29  GB    512   B +  0 B   v1.0000  # noqa: E501
+        # /dev/nvme0n3          SN: 000001           MSFT NVMe Accelerator v1.0               15         44.02  GB /  44.02  GB    512   B +  0 B   v1.0000  # noqa: E501
+        # /dev/nvme0n4          SN: 000001           MSFT NVMe Accelerator v1.0               14          6.44  GB /   6.44  GB    512   B +  0 B   v1.0000  # noqa: E501
+        # /dev/nvme1n1          68e8d42a7ed4e5f90002 Microsoft NVMe Direct Disk v2            1         472.45  GB / 472.45  GB    512   B +  0 B   NVMDV00  # noqa: E501
+        # /dev/nvme2n1          68e8d42a7ed4e5f90001 Microsoft NVMe Direct Disk v2            1         472.45  GB / 472.45  GB    512   B +  0 B   NVMDV00  # noqa: E501
+        #
+        # In the above output all devices starting with /dev/nvme0 are
+        # Azure remote data disks.
+        # /dev/nvme0n1 is the OS disk and
+        # /dev/nvme0n2, /dev/nvme0n3, /dev/nvme0n4 are azure remote data disks.
+        # They are connected at LUN 0, 13 and 12 respectively and their Namespace ids
+        # are 2, 15 and 14.
+        node_disk = self._node.features[Disk]
+        if node_disk.get_os_disk_controller_type() == schema.DiskControllerType.NVME:
+            data_disks = self.get_raw_data_disks()
+            nvme_device_ids = self._node.tools[Nvmecli].get_namespace_ids(
+                force_run=True
             )
-            for line in cmd_result.stdout.splitlines():
-                match = self.LUN_PATTERN_BSD.search(line)
-                if match:
-                    lun_number = int(match.group(1))
-                    device_name = match.group(2)
-                    device_luns.update({device_name: lun_number})
-        else:
-            azure_scsi_disks = self._get_scsi_data_disks()
-            device_luns = {}
-            lun_number_pattern = re.compile(r"[0-9]+$", re.M)
-            for disk in azure_scsi_disks:
-                # /dev/disk/azure/scsi1/lun20 -> 20
-                device_lun = int(get_matched_str(disk, lun_number_pattern))
-                # readlink -f /dev/disk/azure/scsi1/lun0
-                # /dev/sdc
+
+            for nvme_device_id in nvme_device_ids:
+                nvme_device_file = list(nvme_device_id.keys())[0]
+                if self._is_remote_data_disk(nvme_device_file):
+                    # Reduce 2 from Namespace to get the actual LUN number.
+                    device_lun = int(list(nvme_device_id.values())[0]) - 2
+                    if nvme_device_file in data_disks:
+                        device_luns.update(
+                            {
+                                nvme_device_file: device_lun,
+                            }
+                        )
+            return device_luns
+        # If disk_controller_type == SCSI
+        elif node_disk.get_os_disk_controller_type() == schema.DiskControllerType.SCSI:
+            if isinstance(self._node.os, BSD):
                 cmd_result = self._node.execute(
-                    f"readlink -f {disk}", shell=True, sudo=True
+                    "camcontrol devlist",
+                    shell=True,
+                    sudo=True,
                 )
-                device_luns.update({cmd_result.stdout: device_lun})
+                for line in cmd_result.stdout.splitlines():
+                    match = self.LUN_PATTERN_BSD.search(line)
+                    if match:
+                        lun_number = int(match.group(1))
+                        device_name = match.group(2)
+                        device_luns.update({device_name: lun_number})
+            else:
+                azure_scsi_disks = self._get_scsi_data_disks()
+                device_luns = {}
+                lun_number_pattern = re.compile(r"[0-9]+$", re.M)
+                for disk in azure_scsi_disks:
+                    # /dev/disk/azure/scsi1/lun20 -> 20
+                    device_lun = int(get_matched_str(disk, lun_number_pattern))
+                    # readlink -f /dev/disk/azure/scsi1/lun0
+                    # /dev/sdc
+                    cmd_result = self._node.execute(
+                        f"readlink -f {disk}", shell=True, sudo=True
+                    )
+                    device_luns.update({cmd_result.stdout: device_lun})
         return device_luns
 
     def get_raw_data_disks(self) -> List[str]:
@@ -1757,32 +1866,15 @@ class Disk(AzureFeatureMixin, features.Disk):
         # disk_controller_type == NVME
         node_disk = self._node.features[Disk]
         if node_disk.get_os_disk_controller_type() == schema.DiskControllerType.NVME:
-            # Getting OS disk nvme namespace and disk controller used by OS disk.
-            # Sample os_boot_partition:
-            # name: /dev/nvme0n1p15, disk: nvme, mount_point: /boot/efi, type: vfat
-            os_boot_partition = node_disk.get_os_boot_partition()
-            if os_boot_partition:
-                os_disk_namespace = get_matched_str(
-                    os_boot_partition.name,
-                    self.NVME_NAMESPACE_PATTERN,
-                )
-                os_disk_controller = get_matched_str(
-                    os_boot_partition.name,
-                    self.NVME_CONTROLLER_PATTERN,
-                )
-
             # With NVMe disk controller type, all remote SCSI disks are connected to
             # same NVMe controller. The same controller is used by OS disk.
             # This loop collects all the SCSI remote disks except OS disk.
-            nvme = self._node.features[Nvme]
-            nvme_namespaces = nvme.get_namespaces()
+            nvme_cli = self._node.tools[Nvmecli]
+            nvme_disks = nvme_cli.get_disks(force_run=True)
             disk_array = []
-            for name_space in nvme_namespaces:
-                if (
-                    name_space.startswith(os_disk_controller)
-                    and name_space != os_disk_namespace
-                ):
-                    disk_array.append(name_space)
+            for nvme_disk in nvme_disks:
+                if self._is_remote_data_disk(nvme_disk):
+                    disk_array.append(nvme_disk)
             return disk_array
 
         # disk_controller_type == SCSI
@@ -1925,6 +2017,42 @@ class Disk(AzureFeatureMixin, features.Disk):
         self._node.capability.disk.data_disk_count -= len(names)
         self._node.close()
 
+    # verify that resource disk is mounted
+    # function returns successfully if disk matching mount point is present.
+    # raises exception if the resource disk is not mounted
+    # in Azure only SCSI disks are mounted but not NVMe disks
+    def check_resource_disk_mounted(self) -> bool:
+        resource_disk_mount_point = self.get_resource_disk_mount_point()
+        resourcedisk = self.get_partition_with_mount_point(resource_disk_mount_point)
+        if not resourcedisk:
+            raise LisaException(
+                f"Resource disk is not mounted at {resource_disk_mount_point}"
+            )
+        return True
+
+    # get resource disk type
+    # function returns the type of resource disk/disks available on the VM
+    # raises exception if no resource disk is available
+    def get_resource_disk_type(self) -> schema.ResourceDiskType:
+        resource_disks = self.get_resource_disks()
+        if not resource_disks:
+            raise LisaException("No Resource disks are available on VM")
+        return schema.ResourceDiskType(
+            self._node.features[Disk].get_disk_type(disk=resource_disks[0])
+        )
+
+    def get_resource_disks(self) -> List[str]:
+        resource_disk_list = []
+        resource_disk_mount_point = self.get_resource_disk_mount_point()
+        resourcedisk = self._node.features[Disk].get_partition_with_mount_point(
+            resource_disk_mount_point
+        )
+        if resourcedisk:
+            resource_disk_list = [resourcedisk.name]
+        else:
+            resource_disk_list = self._node.features[Nvme].get_raw_nvme_disks()
+        return resource_disk_list
+
     def get_resource_disk_mount_point(self) -> str:
         # get customize mount point from cloud-init configuration file from /etc/cloud/
         # if not found, use default mount point /mnt for cloud-init
@@ -1971,6 +2099,22 @@ class Disk(AzureFeatureMixin, features.Disk):
             partition.mountpoint == "/mnt/resource" for partition in disk.partitions
         )
 
+    def _is_remote_data_disk(self, disk: str) -> bool:
+        # If disk_controller_type == NVME
+        nvme = self._node.features[Nvme]
+        if self.get_os_disk_controller_type() == schema.DiskControllerType.NVME:
+            os_disk_namespace = nvme.get_nvme_os_disk_namespace()
+            os_disk_controller = nvme.get_nvme_os_disk_controller()
+            # When disk_controller_type is NVME, all remote disks are connected to
+            # same NVMe controller. The same controller is used by OS disk.
+            if disk.startswith(os_disk_controller) and disk != os_disk_namespace:
+                return True
+            return False
+
+        # If disk_controller_type == SCSI
+        azure_scsi_disks = self._get_scsi_data_disks()
+        return disk in azure_scsi_disks
+
     def _get_raw_data_disks_bsd(self) -> List[str]:
         disks = self._node.tools[Lsblk].get_disks()
 
@@ -1982,6 +2126,11 @@ class Disk(AzureFeatureMixin, features.Disk):
         ]
 
         return data_disks
+
+    def get_ephemeral_disk_placement_type(self) -> Any:
+        azure_platform: AzurePlatform = self._platform  # type: ignore
+        vm = get_vm(azure_platform, self._node)
+        return vm.storage_profile.os_disk.diff_disk_settings.placement
 
 
 def get_azure_disk_type(disk_type: schema.DiskType) -> str:
@@ -2842,7 +2991,10 @@ class Nfs(AzureFeatureMixin, features.Nfs):
         self.storage_account_name: str = ""
         self.file_share_name: str = ""
 
-    def create_share(self) -> None:
+    def create_share(
+        self,
+        quota_in_gb: int = 100,
+    ) -> None:
         platform: AzurePlatform = self._platform  # type: ignore
         node_context = self._node.capability.get_extended_runbook(AzureNodeSchema)
         location = node_context.location
@@ -2873,6 +3025,7 @@ class Nfs(AzureFeatureMixin, features.Nfs):
             resource_group_name=resource_group_name,
             protocols="NFS",
             log=self._log,
+            quota_in_gb=quota_in_gb,
         )
 
         storage_account_resource_id = (
@@ -3055,18 +3208,38 @@ class AzureExtension(AzureFeatureMixin, Feature):
         self,
         name: str = "",
         timeout: int = 60 * 25,
-    ) -> None:
+        ignore_not_found: bool = False,
+    ) -> bool:
         platform: AzurePlatform = self._platform  # type: ignore
         compute_client = get_compute_client(platform)
         self._log.debug(f"uninstall extension: {name}")
-
-        operation = compute_client.virtual_machine_extensions.begin_delete(
-            resource_group_name=self._resource_group_name,
-            vm_name=self._vm_name,
-            vm_extension_name=name,
-        )
-        # no return for this operation
-        wait_operation(operation, timeout)
+        try:
+            operation = compute_client.virtual_machine_extensions.begin_delete(
+                resource_group_name=self._resource_group_name,
+                vm_name=self._vm_name,
+                vm_extension_name=name,
+            )
+            # no return for this operation
+            wait_operation(operation, timeout)
+            return True
+        except HttpResponseError as identifier:
+            error_message = str(identifier)
+            if "was not found" in error_message:
+                if ignore_not_found:
+                    self._log.info(
+                        f"Extension '{name}' not installed, ignoring deletion."
+                    )
+                    return False
+                else:
+                    raise LisaException(
+                        f"Extension '{name}' not found. Cannot delete "
+                        "non-existent extension."
+                    ) from identifier
+            else:
+                raise LisaException(
+                    "Unexpected error occurred while deleting extension "
+                    f"'{name}': {error_message}"
+                ) from identifier
 
     def list_all(self) -> Any:
         platform: AzurePlatform = self._platform  # type: ignore
@@ -3386,6 +3559,7 @@ class AzureFileShare(AzureFeatureMixin, Feature):
         kind: str = "StorageV2",
         enable_https_traffic_only: bool = True,
         enable_private_endpoint: bool = False,
+        quota_in_gb: int = 100,
     ) -> Dict[str, str]:
         platform: AzurePlatform = self._platform  # type: ignore
         information = environment.get_information()
@@ -3411,6 +3585,8 @@ class AzureFileShare(AzureFeatureMixin, Feature):
         # If enable_private_endpoint is true, SMB share endpoint
         # will dns resolve to <share>.privatelink.file.core.windows.net
         # No changes need to be done in code calling function
+        # For Quota, currently all volumes will share same quota number.
+        # Ensure that you use the highest value applicable for your shares
         for share_name in file_share_names:
             fs_url_dict[share_name] = get_or_create_file_share(
                 credential=platform.credential,
@@ -3420,6 +3596,7 @@ class AzureFileShare(AzureFeatureMixin, Feature):
                 file_share_name=share_name,
                 resource_group_name=resource_group_name,
                 log=self._log,
+                quota_in_gb=quota_in_gb,
             )
         # Create file private endpoint, always after all shares have been created
         # There is a known issue in API preventing access to data plane
