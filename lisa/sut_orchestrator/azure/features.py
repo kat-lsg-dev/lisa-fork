@@ -398,6 +398,7 @@ class SerialConsole(AzureFeatureMixin, features.SerialConsole):
         ws = self._get_connection()
         self._get_event_loop().run_until_complete(ws.send(cmd))
 
+    # @retry(exceptions=(HttpResponseError, asyncio.TimeoutError), tries=3, delay=5, backoff=2)
     def _read(self) -> str:
         self._initialize_serial_console(port_id=self.DEFAULT_SERIAL_PORT_ID)
 
@@ -2563,6 +2564,7 @@ class SecurityProfile(AzureFeatureMixin, features.SecurityProfile):
         raw_capabilities: Any = kwargs.get("raw_capabilities")
         resource_sku: Any = kwargs.get("resource_sku")
         capabilities: List[SecurityProfileType] = [SecurityProfileType.Standard]
+        encrypt_capability: List[bool] = [False]
 
         gen_value = raw_capabilities.get("HyperVGenerations", None)
         cvm_value = raw_capabilities.get("ConfidentialComputingType", None)
@@ -2583,13 +2585,14 @@ class SecurityProfile(AzureFeatureMixin, features.SecurityProfile):
 
         if cvm_value and cvm_value.casefold() == "snp":
             capabilities.append(SecurityProfileType.CVM)
-
+            encrypt_capability.append(True)
         if cvm_value and cvm_value.casefold() == "tdx":
             capabilities.append(SecurityProfileType.CVM)
             capabilities.append(SecurityProfileType.Stateless)
-
+            encrypt_capability.append(True)
         return SecurityProfileSettings(
-            security_profile=search_space.SetSpace(True, capabilities)
+            security_profile=search_space.SetSpace(True, capabilities),
+            encrypt_disk=search_space.SetSpace(True, encrypt_capability),
         )
 
     @classmethod

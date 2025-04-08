@@ -311,6 +311,15 @@ class AzureImageSchema(schema.ImageSchema):
             )
         ),
     )
+    encrypt_disk: Union[search_space.SetSpace[bool], bool] = field(
+        default_factory=partial(
+            search_space.SetSpace[bool], is_allow_set=True, items=[True, False]
+        ),
+        metadata=field_metadata(
+            decoder=partial(search_space.decode_set_space_by_type, base_type=bool),
+            required=False,
+        ),
+    )
 
     def load_from_platform(self, platform: "AzurePlatform") -> None:
         """
@@ -380,20 +389,27 @@ class AzureImageSchema(schema.ImageSchema):
     ) -> None:
         security_profile = raw_features.get("SecurityType")
         capabilities: List[SecurityProfileType] = []
+        encrypt_capability: List[bool] = []
         if security_profile in ["TrustedLaunchSupported", "TrustedLaunch"]:
-            capabilities.append(SecurityProfileType.Standard)
-            capabilities.append(SecurityProfileType.SecureBoot)
+            capabilities.extend(
+                [SecurityProfileType.Standard, SecurityProfileType.SecureBoot]
+            )
+            encrypt_capability.append(False)
         elif security_profile in (
             "TrustedLaunchAndConfidentialVmSupported",
             "ConfidentialVmSupported",
             "ConfidentialVM",
         ):
-            capabilities.append(SecurityProfileType.CVM)
-            capabilities.append(SecurityProfileType.Stateless)
+            capabilities.extend(
+                [SecurityProfileType.CVM, SecurityProfileType.Stateless]
+            )
+            encrypt_capability.extend([True, False])
         else:
             capabilities.append(SecurityProfileType.Standard)
+            encrypt_capability.append(False)
 
         self.security_profile = search_space.SetSpace(True, capabilities)
+        self.encrypt_disk = search_space.SetSpace(True, encrypt_capability)
 
 
 def _get_image_tags(image: Any) -> Dict[str, Any]:
@@ -538,6 +554,7 @@ class VhdSchema(AzureImageSchema):
                     SecurityProfileType.Stateless,
                 ],
             )
+            self.encrypt_disk = search_space.SetSpace(True, [True, False])
         else:
             self.security_profile = search_space.SetSpace(
                 True,
@@ -546,6 +563,7 @@ class VhdSchema(AzureImageSchema):
                     SecurityProfileType.SecureBoot,
                 ],
             )
+            self.encrypt_disk = search_space.SetSpace(True, [False])
 
 
 @dataclass_json()
