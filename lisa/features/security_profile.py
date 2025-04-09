@@ -66,7 +66,11 @@ class SecurityProfileSettings(schema.FeatureSettings):
             search_space.SetSpace[bool], is_allow_set=True, items=[True, False]
         ),
         metadata=field_metadata(
-            decoder=partial(search_space.decode_set_space_by_type, base_type=bool),
+            decoder=partial(
+                search_space.decode_nullable_set_space,
+                base_type=bool,
+                default_values=[False, True],
+            ),
             required=False,
         ),
     )
