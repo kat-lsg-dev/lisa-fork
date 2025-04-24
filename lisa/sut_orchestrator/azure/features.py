@@ -2562,7 +2562,10 @@ class SecurityProfile(AzureFeatureMixin, features.SecurityProfile):
     ) -> Optional[schema.FeatureSettings]:
         raw_capabilities: Any = kwargs.get("raw_capabilities")
         resource_sku: Any = kwargs.get("resource_sku")
-        capabilities: List[SecurityProfileType] = [SecurityProfileType.Standard]
+        security_profile_capabilities: List[SecurityProfileType] = [
+            SecurityProfileType.Standard
+        ]
+        encrypt_capability: List[bool] = [False]
 
         gen_value = raw_capabilities.get("HyperVGenerations", None)
         cvm_value = raw_capabilities.get("ConfidentialComputingType", None)
@@ -2579,17 +2582,18 @@ class SecurityProfile(AzureFeatureMixin, features.SecurityProfile):
                 and ("V2" in str(gen_value))
                 and raw_capabilities.get("TrustedLaunchDisabled", "False") == "False"
             ):
-                capabilities.append(SecurityProfileType.SecureBoot)
+                security_profile_capabilities.append(SecurityProfileType.SecureBoot)
 
         if cvm_value and cvm_value.casefold() == "snp":
-            capabilities.append(SecurityProfileType.CVM)
-
+            security_profile_capabilities.append(SecurityProfileType.CVM)
+            encrypt_capability.append(True)
         if cvm_value and cvm_value.casefold() == "tdx":
-            capabilities.append(SecurityProfileType.CVM)
-            capabilities.append(SecurityProfileType.Stateless)
-
+            security_profile_capabilities.append(SecurityProfileType.CVM)
+            security_profile_capabilities.append(SecurityProfileType.Stateless)
+            encrypt_capability.append(True)
         return SecurityProfileSettings(
-            security_profile=search_space.SetSpace(True, capabilities)
+            security_profile=search_space.SetSpace(True, security_profile_capabilities),
+            encrypt_disk=search_space.SetSpace(True, encrypt_capability),
         )
 
     @classmethod
