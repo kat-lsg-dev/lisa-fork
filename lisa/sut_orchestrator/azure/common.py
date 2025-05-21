@@ -313,7 +313,7 @@ class AzureImageSchema(schema.ImageSchema):
     )
     encrypt_disk: Union[search_space.SetSpace[bool], bool] = field(
         default_factory=partial(
-            search_space.SetSpace[bool], is_allow_set=True, items=[True, False]
+            search_space.SetSpace[bool], is_allow_set=True, items=[False, True]
         ),
         metadata=field_metadata(
             decoder=partial(search_space.decode_set_space_by_type, base_type=bool),
